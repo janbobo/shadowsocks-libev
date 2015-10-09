@@ -11,7 +11,7 @@ It is a port of [shadowsocks](https://github.com/shadowsocks/shadowsocks)
 created by [@clowwindy](https://github.com/clowwindy) maintained by 
 [@madeye](https://github.com/madeye) and [@linusyang](https://github.com/linusyang).
 
-Current version: 2.1.4 | [Changelog](Changes)
+Current version: 2.4.0 | [Changelog](debian/changelog)
 
 Travis CI: [![Travis CI](https://travis-ci.org/shadowsocks/shadowsocks-libev.png?branch=master)](https://travis-ci.org/shadowsocks/shadowsocks-libev) | Jenkins Matrix: [![Jenkins](https://jenkins.shadowvpn.org/buildStatus/icon?job=Shadowsocks-libev)](https://jenkins.shadowvpn.org/job/Shadowsocks-libev/)
 
@@ -67,10 +67,25 @@ sudo apt-get install shadowsocks-libev
 
 #### Build package from source
 
+Supported Platforms:
+
+* Debian 7 (see below), 8, unstable
+* Ubuntu 14.10, 15.04 or higher
+
+To build packages on Debian 7 (Wheezy), you need to enable `debian-backports`
+to install systemd-compatibility packages like `dh-systemd` or `init-system-helpers`.
+
+This also means that you can only install those built packages on systems that have
+`init-system-helpers` installed.
+
+Otherwise, try to build and install directly from source. See the **Linux**
+section below.
+
 ``` bash
 cd shadowsocks-libev
-sudo apt-get install build-essential autoconf libtool libssl-dev gawk debhelper
-dpkg-buildpackage -us -uc
+sudo apt-get install build-essential autoconf libtool libssl-dev \
+    gawk debhelper dh-systemd init-system-helpers
+dpkg-buildpackage -us -uc -i
 cd ..
 sudo dpkg -i shadowsocks-libev*.deb
 ```
@@ -78,11 +93,15 @@ sudo dpkg -i shadowsocks-libev*.deb
 #### Configure and start the service
 
 ```
-# Edit the configuration
+# Edit the configuration file
 sudo vim /etc/shadowsocks-libev/config.json
 
+# Edit the default configuration for debian
+sudo vim /etc/default/shadowsocks-libev
+
 # Start the service
-sudo /etc/init.d/shadowsocks-libev start
+sudo /etc/init.d/shadowsocks-libev start    # for sysvinit, or
+sudo systemctl start shasowsocks-libev      # for systemd
 ```
 
 ### Fedora & RHEL
@@ -166,6 +185,20 @@ make -j
 make V=99 package/shadowsocks-libev/openwrt/compile
 ```
 
+### OS X
+For OS X , use [homebrew](http://brew.sh) to install or build.
+
+Install homebrew
+
+```bash
+ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
+```
+Install shadowsocks-libev
+
+```bash
+brew install shadowsocks-libev
+```
+
 ### Windows
 
 For Windows, use either MinGW (msys) or Cygwin to build.
@@ -242,7 +275,12 @@ Usage
                                   not available in server mode
 
        [-u]                       enable udprelay mode,
-                                  not available in redir mode
+                                  TPROXY is required in redir mode
+
+       [-U]                       enable UDP relay and disable TCP relay,
+                                  not available in local mode
+
+       [-A]                       enable onetime authentication
 
        [-L <addr>:<port>]         specify destination server address and port
                                   for local port forwarding,
@@ -252,10 +290,17 @@ Usage
                                   only available in server mode
 
        [--fast-open]              enable TCP fast open,
-                                  only available on Linux kernel > 3.7.0
+                                  only available in local and server mode,
+                                  with Linux kernel > 3.7.0
 
        [--acl <acl_file>]         config file of ACL (Access Control List)
                                   only available in local and server mode
+
+       [--manager-address <addr>] UNIX domain socket address
+                                  only available in server and manager mode
+
+       [--executable <path>]      path to the executable of ss-server
+                                  only available in manager mode
 
        [-v]                       verbose mode
 
@@ -272,6 +317,7 @@ The latest shadowsocks-libev has provided a *redir* mode. You can configure your
 
     # Create new chain
     root@Wrt:~# iptables -t nat -N SHADOWSOCKS
+    root@Wrt:~# iptables -t mangle -N SHADOWSOCKS
     
     # Ignore your shadowsocks server's addresses
     # It's very IMPORTANT, just be careful.
@@ -291,12 +337,18 @@ The latest shadowsocks-libev has provided a *redir* mode. You can configure your
 
     # Anything else should be redirected to shadowsocks's local port
     root@Wrt:~# iptables -t nat -A SHADOWSOCKS -p tcp -j REDIRECT --to-ports 12345
+
+    # Add any UDP rules
+    root@Wrt:~# ip rule add fwmark 0x01/0x01 table 100
+    root@Wrt:~# ip route add local 0.0.0.0/0 dev lo table 100
+    root@Wrt:~# iptables -t mangle -A SHADOWSOCKS -p udp --dport 53 -j TPROXY --on-port 12345 --tproxy-mark 0x01/0x01
     
     # Apply the rules
-    root@Wrt:~# iptables -t nat -A OUTPUT -p tcp -j SHADOWSOCKS
-    
+    root@Wrt:~# iptables -t nat -A PREROUTING -p tcp -j SHADOWSOCKS
+    root@Wrt:~# iptables -t mangle -A PREROUTING -j SHADOWSOCKS
+
     # Start the shadowsocks-redir
-    root@Wrt:~# ss-redir -c /etc/config/shadowsocks.json -f /var/run/shadowsocks.pid
+    root@Wrt:~# ss-redir -u -c /etc/config/shadowsocks.json -f /var/run/shadowsocks.pid
 
 ## Security Tips
 

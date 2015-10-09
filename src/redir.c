@@ -47,6 +47,7 @@
 
 #include "netutils.h"
 #include "utils.h"
+#include "common.h"
 #include "redir.h"
 
 #ifndef EAGAIN
@@ -79,6 +80,10 @@ static void close_and_free_remote(EV_P_ struct remote *remote);
 static void free_server(struct server *server);
 static void close_and_free_server(EV_P_ struct server *server);
 
+int verbose = 0;
+
+static int mode = TCP_ONLY;
+static int auth = 0;
 
 int getdestaddr(int fd, struct sockaddr_storage *destaddr)
 {
@@ -179,7 +184,12 @@ static void server_recv_cb(EV_P_ ev_io *w, int revents)
         }
     }
 
+    if (auth) {
+        remote->buf = ss_gen_hash(remote->buf, &r, &remote->counter, server->e_ctx, BUF_SIZE);
+    }
+
     remote->buf = ss_encrypt(BUF_SIZE, remote->buf, &r, server->e_ctx);
+
     if (remote->buf == NULL) {
         LOGE("invalid password or cipher");
         close_and_free_remote(EV_A_ remote);
@@ -188,6 +198,7 @@ static void server_recv_cb(EV_P_ ev_io *w, int revents)
     }
 
     int s = send(remote->fd, remote->buf, r, 0);
+
     if (s == -1) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // no data, wait for send
@@ -363,6 +374,13 @@ static void remote_send_cb(EV_P_ ev_io *w, int revents)
                        2);
             }
             addr_len += 2;
+
+            if (auth) {
+                ss_addr_to_send[0] |= ONETIMEAUTH_FLAG;
+                ss_onetimeauth(ss_addr_to_send + addr_len, ss_addr_to_send, addr_len, server->e_ctx->evp.iv);
+                addr_len += ONETIMEAUTH_BYTES;
+            }
+
             ss_addr_to_send = ss_encrypt(BUF_SIZE, ss_addr_to_send, &addr_len,
                                          server->e_ctx);
             if (ss_addr_to_send == NULL) {
@@ -432,6 +450,9 @@ static struct remote * new_remote(int fd, int timeout)
 {
     struct remote *remote;
     remote = malloc(sizeof(struct remote));
+
+    memset(remote, 0, sizeof(struct remote));
+
     remote->buf = malloc(BUF_SIZE);
     remote->recv_ctx = malloc(sizeof(struct remote_ctx));
     remote->send_ctx = malloc(sizeof(struct remote_ctx));
@@ -610,7 +631,7 @@ int main(int argc, char **argv)
 
     opterr = 0;
 
-    while ((c = getopt(argc, argv, "f:s:p:l:k:t:m:c:b:a:")) != -1) {
+    while ((c = getopt(argc, argv, "f:s:p:l:k:t:m:c:b:a:uUvA")) != -1) {
         switch (c) {
         case 's':
             if (remote_num < MAX_REMOTE_NUM) {
@@ -646,12 +667,30 @@ int main(int argc, char **argv)
         case 'a':
             user = optarg;
             break;
+        case 'u':
+            mode = TCP_AND_UDP;
+            break;
+        case 'U':
+            mode = UDP_ONLY;
+            break;
+        case 'v':
+            verbose = 1;
+            break;
+        case 'A':
+            auth = 1;
+            break;
         }
     }
 
     if (opterr) {
         usage();
         exit(EXIT_FAILURE);
+    }
+
+    if (argc == 1) {
+        if (conf_path == NULL) {
+            conf_path = DEFAULT_CONF_PATH;
+        }
     }
 
     if (conf_path != NULL) {
@@ -680,6 +719,9 @@ int main(int argc, char **argv)
         if (timeout == NULL) {
             timeout = conf->timeout;
         }
+        if (auth == 0) {
+            auth = conf->auth;
+        }
     }
 
     if (remote_num == 0 || remote_port == NULL ||
@@ -689,7 +731,7 @@ int main(int argc, char **argv)
     }
 
     if (timeout == NULL) {
-        timeout = "10";
+        timeout = "60";
     }
 
     if (local_addr == NULL) {
@@ -701,6 +743,10 @@ int main(int argc, char **argv)
         daemonize(pid_path);
     }
 
+    if (auth) {
+        LOGI("onetime authentication enabled");
+    }
+
     // ignore SIGPIPE
     signal(SIGPIPE, SIG_IGN);
     signal(SIGABRT, SIG_IGN);
@@ -708,18 +754,6 @@ int main(int argc, char **argv)
     // Setup keys
     LOGI("initialize ciphers... %s", method);
     int m = enc_init(password, method);
-
-    // Setup socket
-    int listenfd;
-    listenfd = create_and_bind(local_addr, local_port);
-    if (listenfd < 0) {
-        FATAL("bind() error");
-    }
-    if (listen(listenfd, SOMAXCONN) == -1) {
-        FATAL("listen() error");
-    }
-    setnonblocking(listenfd);
-    LOGI("listening at %s:%s", local_addr, local_port);
 
     // Setup proxy context
     struct listen_ctx listen_ctx;
@@ -731,18 +765,46 @@ int main(int argc, char **argv)
                      remote_addr[i].port;
         struct sockaddr_storage *storage = malloc(sizeof(struct sockaddr_storage));
         memset(storage, 0, sizeof(struct sockaddr_storage));
-        if (get_sockaddr(host, port, storage) == -1) {
+        if (get_sockaddr(host, port, storage, 1) == -1) {
             FATAL("failed to resolve the provided hostname");
         }
         listen_ctx.remote_addr[i] = (struct sockaddr *)storage;
     }
     listen_ctx.timeout = atoi(timeout);
-    listen_ctx.fd = listenfd;
     listen_ctx.method = m;
 
     struct ev_loop *loop = EV_DEFAULT;
-    ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
-    ev_io_start(loop, &listen_ctx.io);
+
+    if (mode != UDP_ONLY) {
+        // Setup socket
+        int listenfd;
+        listenfd = create_and_bind(local_addr, local_port);
+        if (listenfd < 0) {
+            FATAL("bind() error");
+        }
+        if (listen(listenfd, SOMAXCONN) == -1) {
+            FATAL("listen() error");
+        }
+        setnonblocking(listenfd);
+
+        listen_ctx.fd = listenfd;
+
+        ev_io_init(&listen_ctx.io, accept_cb, listenfd, EV_READ);
+        ev_io_start(loop, &listen_ctx.io);
+    }
+
+    // Setup UDP
+    if (mode != TCP_ONLY) {
+        LOGI("UDP relay enabled");
+        init_udprelay(local_addr, local_port, listen_ctx.remote_addr[0],
+                      get_sockaddr_len(listen_ctx.remote_addr[0]), m, auth, listen_ctx.timeout, NULL);
+    }
+
+    if (mode == UDP_ONLY) {
+        LOGI("TCP relay disabled");
+    }
+
+    LOGI("listening at %s:%s", local_addr, local_port);
 
     // setuid
     if (user != NULL) {

@@ -1,10 +1,12 @@
-# Defaults for redsocks initscript
-# sourced by /etc/init.d/redsocks
-# installed at /etc/default/redsocks by the maintainer scripts
+# Defaults for shadowsocks initscript
+# sourced by /etc/init.d/shadowsocks-libev
+# installed at /etc/default/shadowsocks-libev by the maintainer scripts
 
 #
 # This is a POSIX shell fragment
 #
+# Note: `START', `GROUP' and `MAXFD' options are not recognized by systemd.
+# Please change those settings in the corresponding systemd unit file.
 
 # Enable during startup?
 START=yes
